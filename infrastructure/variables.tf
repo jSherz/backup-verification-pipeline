@@ -1,0 +1,1 @@
+variable "snapshot_bucket" {}

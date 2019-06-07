@@ -1,0 +1,58 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.7
+    commands:
+      - docker pull docker.elastic.co/elasticsearch/elasticsearch:7.1.1
+
+      - |
+        docker run \
+          --publish 9200:9200 \
+          --rm \
+          --env "discovery.type=single-node" \
+          --detach \
+          --name elasticsearch \
+          docker.elastic.co/elasticsearch/elasticsearch:7.1.1
+
+      - docker exec elasticsearch bin/elasticsearch-plugin install repository-s3 --batch
+
+      - curl "http://169.254.170.2"${AWS_CONTAINER_CREDENTIALS_RELATIVE_URI} > creds
+
+      - docker exec elasticsearch sh -c "echo \"$(cat creds | jq --raw-output .AccessKeyId)\" | bin/elasticsearch-keystore add --stdin s3.client.default.access_key"
+      - docker exec elasticsearch sh -c "echo \"$(cat creds | jq --raw-output .SecretAccessKey)\" | bin/elasticsearch-keystore add --stdin s3.client.default.secret_key"
+      - docker exec elasticsearch sh -c "echo \"$(cat creds | jq --raw-output .Token)\" | bin/elasticsearch-keystore add --stdin s3.client.default.session_token"
+
+      - docker restart elasticsearch
+
+      - |
+        ES_READY=false
+        while [ $ES_READY != true ]
+        do
+          curl http://localhost:9200 && ES_READY=true || echo Waiting for ES...
+          sleep 1
+        done
+
+      - |
+        cat << EOF > creds-json
+          {
+            "type": "s3",
+            "settings": {
+              "bucket": "${SNAPSHOT_BUCKET}",
+              "readonly": true
+            }
+          }
+        EOF
+
+      - |
+        curl \
+          -H "Content-Type: application/json" \
+          -XPUT \
+          -d @creds-json \
+          http://localhost:9200/_snapshot/${ES_REPO}
+
+      - aws s3 cp s3://${SNAPSHOT_BUCKET}/verify.py verify.py
+      - aws s3 cp s3://${SNAPSHOT_BUCKET}/requirements.txt requirements.txt
+      - pip install -r requirements.txt
+      - python verify.py
